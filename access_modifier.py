@@ -14,8 +14,8 @@ Access Control Functions:
 
 """
 
+from db_manager import execute_query, VALID_ROLES
 
-from dbm import execute_query
 
 def access_identifier(user_id):
     """Fetches the role of the user based on their user_id."""
@@ -27,22 +27,31 @@ def access_identifier(user_id):
         return rows[0]["role"]
     return None
 
+
 def is_admin(user_id):
     """Checks if the user has an admin role."""
-    role = access_identifier(user_id)
-    return role == 'admin'
+    return access_identifier(user_id) == 'admin'
+
+
 def is_head_or_admin(user_id):
     """Checks if the user has a head or admin role."""
-    role = access_identifier(user_id)
-    return role == 'head' or role == 'admin'
+    return access_identifier(user_id) in ('head', 'admin')
+
 
 def change_user_role(user_id, new_role):
-    """Changes the role of a user. Returns True on success."""
+    """Changes the role of a user. Returns True on success, False if the role
+    is invalid, the user doesn't exist, or the update fails.
+
+    Callers must check is_admin(acting_user_id) before calling this.
+    """
+    if new_role not in VALID_ROLES or access_identifier(user_id) is None:
+        return False
     result = execute_query(
         "UPDATE users SET role = ? WHERE id = ?",
         (new_role, user_id),
     )
     return result is not None
+
 
 def get_all_users():
     """Fetches all users and their roles."""
