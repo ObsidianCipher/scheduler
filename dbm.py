@@ -2,119 +2,134 @@
 # Donot edit this file unless you are sure of what you are doing. Any changes made to this file should be reported.
 #The intial prototype will be using SQLite as the database. However, the code is designed to be easily adaptable to other databases in the future.
 # Gateway to 2 dbs : users, schedule 
-import hashlib
-import hmac
-import os
+
 import sqlite3
 
-
-_SCRYPT_N = 2**14
-_SCRYPT_R = 8
-_SCRYPT_P = 1
-_SCRYPT_DKLEN = 32
-_SALT_BYTES = 16
-
-
-def hash_password(password):
-    """Hash a password with a unique salt using memory-hard scrypt."""
-    if not isinstance(password, str):
-        raise TypeError("password must be a string")
-
-    salt = os.urandom(_SALT_BYTES)
-    derived_key = hashlib.scrypt(
-        password.encode("utf-8"),
-        salt=salt,
-        n=_SCRYPT_N,
-        r=_SCRYPT_R,
-        p=_SCRYPT_P,
-        dklen=_SCRYPT_DKLEN,
-    )
-    return "scrypt$%d$%d$%d$%s$%s" % (
-        _SCRYPT_N,
-        _SCRYPT_R,
-        _SCRYPT_P,
-        salt.hex(),
-        derived_key.hex(),
-    )
-
-
-def verify_password(password, encoded_hash):
-    """Verify a password against a scrypt hash using constant-time comparison."""
-    if not isinstance(password, str) or not isinstance(encoded_hash, str):
-        return False
-
-    try:
-        algorithm, n, r, p, salt_hex, expected_hex = encoded_hash.split("$")
-        if algorithm != "scrypt":
-            return False
-        salt = bytes.fromhex(salt_hex)
-        expected = bytes.fromhex(expected_hex)
-        actual = hashlib.scrypt(
-            password.encode("utf-8"),
-            salt=salt,
-            n=int(n),
-            r=int(r),
-            p=int(p),
-            dklen=len(expected),
-        )
-        return hmac.compare_digest(actual, expected)
-    except (TypeError, ValueError, OverflowError):
-        return False
-
-
 def get_db_connection():
-    """Establishes a connection to the SQLite database and returns the connection object."""
+    """Establishes a connection to the SQLite database with foreign keys enabled."""
     try:
-        # Connect to the SQLite database (or create it if it doesn't exist)
         conn = sqlite3.connect('database.db')
-        conn.row_factory = sqlite3.Row  # Enable accessing columns by name
+        conn.row_factory = sqlite3.Row
+        conn.execute('PRAGMA foreign_keys = ON;')
         return conn
     except sqlite3.Error as e:
         print(f"Database connection error: {e}")
         return None
+
 
 def close_db_connection(conn):
     """Closes the database connection."""
     if conn:
         conn.close()
 
+
 def initialize_database():
     """Initializes the database by creating necessary tables if they don't exist."""
     conn = get_db_connection()
     if conn is not None:
         try:
-            cursor = conn.cursor()
-            # Create a sample table (you can modify this to create your own tables)
-            cursor.execute('''
-                CREATE TABLE IF NOT EXISTS users (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    username TEXT NOT NULL,
-                    email TEXT NOT NULL,
-                    password TEXT NOT NULL
-                )
-            ''')
-            conn.commit()
+            with conn:
+                conn.execute('''
+                    CREATE TABLE IF NOT EXISTS users (
+                        id INTEGER PRIMARY KEY,
+                        username TEXT NOT NULL UNIQUE COLLATE NOCASE,
+                        email TEXT NOT NULL UNIQUE COLLATE NOCASE,
+                        password_hash TEXT NOT NULL,
+                        created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                        role TEXT NOT NULL DEFAULT 'user'  -- Added role column with default value
+                    ) STRICT;
+                ''')
+                # Change BETWEEN 1 AND 6 to BETWEEN 1 AND 5 if restricting to Monday-Friday
+                conn.execute('''
+                    CREATE TABLE IF NOT EXISTS schedule (
+                        id INTEGER PRIMARY KEY,
+                        user_id INTEGER NOT NULL,
+                        day_of_week INTEGER NOT NULL CHECK (day_of_week BETWEEN 1 AND 6),
+                        period_number INTEGER NOT NULL CHECK (period_number BETWEEN 1 AND 6),
+                        subject TEXT,
+                        UNIQUE (user_id, day_of_week, period_number),
+                        FOREIGN KEY (user_id) REFERENCES users (id) ON DELETE CASCADE
+                    ) STRICT;
+                ''')
         except sqlite3.Error as e:
             print(f"Database initialization error: {e}")
         finally:
             close_db_connection(conn)
 
-def execute_query(query, params=None):
-    """Executes a SQL query with optional parameters and returns the result."""
+
+def execute_query(query, params=()):
+    """Executes a SQL query with optional parameters and returns fetched rows."""
     conn = get_db_connection()
     if conn is not None:
         try:
-            cursor = conn.cursor()
-            if params:
-                cursor.execute(query, params)
-            else:
-                cursor.execute(query)
-            conn.commit()
-            return cursor.fetchall()  # Return all results
+            with conn:
+                cursor = conn.execute(query, params)
+                return cursor.fetchall()
         except sqlite3.Error as e:
             print(f"Database query error: {e}")
             return None
         finally:
             close_db_connection(conn)
 
+def initialize_database():
+    """Initializes the database by creating necessary tables if they don't exist."""
+    conn = get_db_connection()
+    if conn is not None:
+        try:
+            with conn:
+                conn.execute('''
+                    CREATE TABLE IF NOT EXISTS users (
+                        id INTEGER PRIMARY KEY,
+                        username TEXT NOT NULL UNIQUE COLLATE NOCASE,
+                        email TEXT NOT NULL UNIQUE COLLATE NOCASE,
+                        password_hash TEXT NOT NULL,
+                        created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+                    ) STRICT;
+                ''')
+                # Restricted to 5 days (1 = Monday to 5 = Friday) and 6 periods
+                conn.execute('''
+                    CREATE TABLE IF NOT EXISTS schedule (
+                        id INTEGER PRIMARY KEY,
+                        user_id INTEGER NOT NULL,
+                        day_of_week INTEGER NOT NULL CHECK (day_of_week BETWEEN 1 AND 5),
+                        period_number INTEGER NOT NULL CHECK (period_number BETWEEN 1 AND 6),
+                        subject TEXT,
+                        UNIQUE (user_id, day_of_week, period_number),
+                        FOREIGN KEY (user_id) REFERENCES users (id) ON DELETE CASCADE
+                    ) STRICT;
+                ''')
+        except sqlite3.Error as e:
+            print(f"Database initialization error: {e}")
+        finally:
+            close_db_connection(conn)
+
+
+
+
+def set_period(user_id, day_of_week, period_number, subject):
+    """Inserts or updates a single period (day 1-5, period 1-6) for a user."""
+    result = execute_query(
+        """
+        INSERT INTO schedule (user_id, day_of_week, period_number, subject)
+        VALUES (?, ?, ?, ?)
+        ON CONFLICT (user_id, day_of_week, period_number)
+        DO UPDATE SET subject = excluded.subject
+        """,
+        (user_id, day_of_week, period_number, subject),
+    )
+    return result is not None
+
+
+def get_weekly_schedule(user_id):
+    """Returns a user's full Mon-Fri schedule sorted by day and period."""
+    rows = execute_query(
+        """
+        SELECT day_of_week, period_number, subject
+        FROM schedule
+        WHERE user_id = ?
+        ORDER BY day_of_week, period_number
+        """,
+        (user_id,),
+    )
+    return [dict(row) for row in rows] if rows is not None else []
 
